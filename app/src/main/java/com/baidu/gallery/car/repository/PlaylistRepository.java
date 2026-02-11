@@ -1,6 +1,7 @@
 package com.baidu.gallery.car.repository;
 
 import android.content.Context;
+import android.text.TextUtils;
 import android.util.Log;
 
 import androidx.lifecycle.LiveData;
@@ -15,6 +16,9 @@ import com.baidu.gallery.car.model.FileInfo;
 
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -219,40 +223,56 @@ public class PlaylistRepository {
                     return;
                 }
                 
-                // 1. 获取源目录路径
-                String sourcePathsJson = playlist.getSourcePaths();
-                if (sourcePathsJson == null || sourcePathsJson.isEmpty()) {
-                    Log.w(TAG, "播放列表没有源目录信息，无法刷新");
-                    if (onError != null) {
-                        new android.os.Handler(android.os.Looper.getMainLooper()).post(onError);
-                    }
-                    return;
-                }
-                
-                // 解析源目录路径
+                // 1. 尝试从 sourcePaths 获取（兼容旧逻辑，如果有明确的sourcePaths则优先使用）
                 List<String> sourcePaths = new java.util.ArrayList<>();
-                try {
-                    org.json.JSONArray jsonArray = new org.json.JSONArray(sourcePathsJson);
-                    for (int i = 0; i < jsonArray.length(); i++) {
-                        sourcePaths.add(jsonArray.getString(i));
+                String sourcePathsJson = playlist.getSourcePaths();
+                boolean hasExplicitSourcePaths = false;
+                
+                if (sourcePathsJson != null && !sourcePathsJson.isEmpty()) {
+                    try {
+                        org.json.JSONArray jsonArray = new org.json.JSONArray(sourcePathsJson);
+                        for (int i = 0; i < jsonArray.length(); i++) {
+                            sourcePaths.add(jsonArray.getString(i));
+                        }
+                        if (!sourcePaths.isEmpty()) {
+                            hasExplicitSourcePaths = true;
+                        }
+                    } catch (org.json.JSONException e) {
+                        Log.w(TAG, "解析源目录路径失败，尝试使用智能推断", e);
                     }
-                } catch (org.json.JSONException e) {
-                    Log.e(TAG, "解析源目录路径失败", e);
-                    if (onError != null) {
-                        new android.os.Handler(android.os.Looper.getMainLooper()).post(onError);
-                    }
-                    return;
                 }
                 
-                if (sourcePaths.isEmpty()) {
-                    Log.w(TAG, "播放列表源目录为空，无法刷新");
-                    if (onError != null) {
-                        new android.os.Handler(android.os.Looper.getMainLooper()).post(onError);
+                // 2. 如果没有明确的 sourcePaths，使用智能推断算法（参考项目算法）
+                if (!hasExplicitSourcePaths) {
+                    List<PlaylistItem> currentItems = playlistItemDao.getItemsByPlaylistIdSync(playlist.getId());
+                    if (currentItems == null || currentItems.isEmpty()) {
+                        Log.w(TAG, "播放列表为空且无源目录信息，无法刷新");
+                        if (onError != null) {
+                            new android.os.Handler(android.os.Looper.getMainLooper()).post(onError);
+                        }
+                        return;
                     }
-                    return;
+                    
+                    Set<String> calculatedRoots = calculateSyncRoots(currentItems);
+                    sourcePaths.addAll(calculatedRoots);
+                    
+                    if (sourcePaths.isEmpty()) {
+                        Log.w(TAG, "无法推断扫描路径");
+                        if (onError != null) {
+                            new android.os.Handler(android.os.Looper.getMainLooper()).post(onError);
+                        }
+                        return;
+                    }
+                    
+                    // 更新 playlist 的 sourcePaths，以便下次直接使用（可选）
+                    // JSONArray jsonArray = new JSONArray(sourcePaths);
+                    // playlist.setSourcePaths(jsonArray.toString());
+                    // playlistDao.update(playlist);
                 }
                 
-                // 2. 递归获取所有文件
+                Log.d(TAG, "确定扫描路径: " + sourcePaths);
+                
+                // 3. 递归获取所有文件
                 List<com.baidu.gallery.car.model.FileInfo> allFiles = new java.util.ArrayList<>();
                 final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(sourcePaths.size());
                 final java.util.concurrent.atomic.AtomicBoolean hasError = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -293,7 +313,7 @@ public class PlaylistRepository {
                 
                 Log.d(TAG, "获取到新文件列表，总数: " + allFiles.size());
                 
-                // 3. 过滤并转换为播放列表项
+                // 4. 过滤并转换为播放列表项
                 List<PlaylistItem> newItems = new java.util.ArrayList<>();
                 long totalDuration = 0;
                 int videoCount = 0;
@@ -326,9 +346,7 @@ public class PlaylistRepository {
                         
                         if (fileInfo.isVideo()) {
                             item.setMediaType(1);
-                            // 注意：FileInfo中可能没有时长信息，这里暂时设为0
-                            // 实际应用中可能需要额外获取视频详情
-                            item.setDuration(0);
+                            item.setDuration(0); // FileInfo通常没有时长
                             videoCount++;
                         } else if (fileInfo.isImage()) {
                             item.setMediaType(2);
@@ -339,8 +357,7 @@ public class PlaylistRepository {
                     }
                 }
                 
-                // 4. 更新数据库
-                // 使用事务操作：删除旧项，插入新项，更新播放列表信息
+                // 5. 更新数据库
                 AppDatabase.getInstance(null).runInTransaction(() -> {
                     // 删除旧项
                     playlistItemDao.deleteByPlaylistId(playlist.getId());
@@ -350,17 +367,11 @@ public class PlaylistRepository {
                     
                     // 更新播放列表统计信息
                     playlist.setTotalItems(newItems.size());
-                    // 如果全是图片，时长为0；如果有视频，这里仅累加已知时长
-                    // 由于列表接口可能不返回时长，这里暂不更新时长，或者保持原有时长逻辑
                     
-                    // 更新封面：如果原封面是其中的文件，保留；否则使用第一个文件的缩略图
-                    if (!newItems.isEmpty()) {
-                        String firstItemThumb = newItems.get(0).getFilePath(); // 这里应该使用缩略图地址，但暂时用路径代替
-                        // 实际上应该保持原封面，或者提供选项更新封面
-                        // 这里简单处理：如果当前没有封面，设置第一个项目的封面
-                        if (playlist.getCoverImagePath() == null || playlist.getCoverImagePath().isEmpty()) {
-                            // 注意：这里只是路径，实际显示时需要获取缩略图链接
-                            // 我们可以暂时不更新封面，或者需要额外的逻辑来获取缩略图
+                    // 如果列表原本没有封面，且有新项，尝试设置封面（简单逻辑）
+                    if (playlist.getCoverImagePath() == null || playlist.getCoverImagePath().isEmpty()) {
+                        if (!newItems.isEmpty()) {
+                            // 这里可以考虑设置一个标志位或者默认封面逻辑
                         }
                     }
                     
@@ -380,5 +391,58 @@ public class PlaylistRepository {
                 }
             }
         });
+    }
+
+    /**
+     * 核心算法：推导最小扫描根集合
+     * 策略：
+     * 1. 提取所有歌曲的直接父文件夹路径
+     * 2. 相互比较，如果路径A包含路径B（即A是B的父级），则只保留A
+     * 3. 最终留下的就是最顶层的文件夹集合
+     */
+    private Set<String> calculateSyncRoots(List<PlaylistItem> items) {
+        // 1. 收集所有唯一的父路径
+        Set<String> parentPaths = new HashSet<>();
+        for (PlaylistItem item : items) {
+            String parent = getParentPath(item.getFilePath());
+            if (!TextUtils.isEmpty(parent)) {
+                parentPaths.add(parent);
+            }
+        }
+
+        // 2. 转换为List以便排序和比较
+        List<String> sortedPaths = new ArrayList<>(parentPaths);
+        // 按长度排序，短的在前（父目录通常比子目录短）
+        Collections.sort(sortedPaths);
+
+        // 3. 过滤被包含的路径
+        Set<String> roots = new HashSet<>();
+        for (String path : sortedPaths) {
+            boolean isChild = false;
+            // 检查当前path是否是roots中某个路径的子路径
+            for (String root : roots) {
+                // 判断逻辑：root是path的前缀，且path的下一个字符是'/'（或者是完全相等）
+                if (path.startsWith(root)) {
+                    if (path.length() == root.length() || path.charAt(root.length()) == '/') {
+                        isChild = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (!isChild) {
+                roots.add(path);
+            }
+        }
+
+        return roots;
+    }
+
+    private String getParentPath(String path) {
+        if (TextUtils.isEmpty(path) || path.equals("/")) return null;
+        int lastSlash = path.lastIndexOf('/');
+        if (lastSlash == 0) return "/"; // 父路径是根
+        if (lastSlash > 0) return path.substring(0, lastSlash);
+        return null;
     }
 }
