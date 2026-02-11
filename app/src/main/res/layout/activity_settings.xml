@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background"
+    android:padding="32dp">
+
+    <TextView
+        android:id="@+id/tv_settings_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="设置"
+        android:textColor="@color/text_primary"
+        android:textSize="32sp"
+        android:textStyle="bold"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="24dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/tv_settings_title">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- 图片展示特效 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="24dp"
+                android:addStatesFromChildren="true"
+                android:background="@drawable/selector_item_background"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="图片展示特效"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp" />
+
+                <RadioGroup
+                    android:id="@+id/rg_image_effect_row1"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/rb_effect_fade"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="淡入淡出"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_effect_ease"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="缓动"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_effect_float"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="浮现"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_effect_bounce"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="跳动"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+                </RadioGroup>
+
+                <RadioGroup
+                    android:id="@+id/rg_image_effect_row2"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/rb_effect_blinds"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="百叶窗"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_effect_zoom"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="放大"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_effect_rotate"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="旋转"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_effect_slide"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="两侧划入"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_effect_random"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="随机"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+                </RadioGroup>
+            </LinearLayout>
+
+            <!-- 图片展示时长 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="24dp"
+                android:addStatesFromChildren="true"
+                android:background="@drawable/selector_item_background"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="图片展示时长（秒）"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp" />
+
+                <SeekBar
+                    android:id="@+id/seekbar_display_duration"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:max="30"
+                    android:min="3"
+                    android:focusable="true"
+                    android:stateListAnimator="@animator/focus_scale" />
+
+                <TextView
+                    android:id="@+id/tv_display_duration"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="5秒"
+                    android:textColor="@color/text_secondary" />
+            </LinearLayout>
+
+            <!-- 播放顺序 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="24dp"
+                android:addStatesFromChildren="true"
+                android:background="@drawable/selector_item_background"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="播放顺序"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp" />
+
+                <RadioGroup
+                    android:id="@+id/rg_play_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/rb_mode_sequential"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="顺序播放"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_mode_reverse"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="倒序播放"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_mode_random"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="随机播放"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_mode_single"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="单曲循环"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+                </RadioGroup>
+            </LinearLayout>
+
+            <!-- 图片背景模式 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="24dp"
+                android:addStatesFromChildren="true"
+                android:background="@drawable/selector_item_background"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="图片背景模式"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp" />
+
+                <RadioGroup
+                    android:id="@+id/rg_background_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/rb_background_black"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="纯黑色"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_background_color"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="16dp"
+                        android:text="主色调"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+
+                    <RadioButton
+                        android:id="@+id/rb_background_blur"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="毛玻璃"
+                        android:textColor="@color/text_secondary"
+                        android:focusable="true"
+                        android:stateListAnimator="@animator/focus_scale" />
+                </RadioGroup>
+                
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="提示：主色调模式性能最佳，毛玻璃视觉效果最好"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="14sp"
+                    android:alpha="0.7" />
+            </LinearLayout>
+
+            <!-- 地点显示开关 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="24dp"
+                android:addStatesFromChildren="true"
+                android:background="@drawable/selector_item_background"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="显示拍摄地点"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp" />
+
+                <Switch
+                    android:id="@+id/switch_show_location"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:focusable="true"
+                    android:stateListAnimator="@animator/focus_scale" />
+            </LinearLayout>
+
+            <!-- 退出登录 -->
+            <Button
+                android:id="@+id/btn_logout"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:backgroundTint="#FF4444"
+                android:focusable="true"
+                android:text="退出登录"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:stateListAnimator="@animator/focus_scale" />
+
+        </LinearLayout>
+    </ScrollView>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

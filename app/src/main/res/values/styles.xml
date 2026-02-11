@@ -1,0 +1,28 @@
+<resources>
+    <!-- Base application theme -->
+    <style name="Theme.BaiduGalleryCarPlayer" parent="Theme.Leanback">
+        <item name="android:colorPrimary">#1E88E5</item>
+        <item name="android:colorPrimaryDark">#1565C0</item>
+        <item name="android:colorAccent">#FF4081</item>
+    </style>
+
+    <style name="Theme.BaiduGalleryCarPlayer.NoActionBar" parent="Theme.Leanback">
+        <item name="android:windowNoTitle">true</item>
+    </style>
+
+    <!-- Leanback theme -->
+    <style name="Theme.BaiduGalleryCarPlayer.Leanback" parent="Theme.Leanback">
+        <item name="android:colorPrimary">#1E88E5</item>
+        <item name="android:windowBackground">@color/black</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
+
+    <!-- Fullscreen theme for player -->
+    <style name="Theme.BaiduGalleryCarPlayer.Fullscreen" parent="Theme.Leanback">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">@color/black</item>
+    </style>
+</resources>
