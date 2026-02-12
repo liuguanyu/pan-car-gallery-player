@@ -5,7 +5,7 @@ import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
@@ -39,9 +39,16 @@ public class FileBrowserFragment extends Fragment {
     private FileBrowserViewModel viewModel;
     private FileAdapter adapter;
     private TextView tvCurrentPath;
-    private Button btnRecursive;
-    private Button btnSort;
-    private Button btnPlaySelected;
+    private android.widget.LinearLayout btnBack;
+    private android.widget.LinearLayout btnRecursive;
+    private TextView tvRecursiveLabel;
+    private android.widget.LinearLayout btnSort;
+    private TextView tvSortLabel;
+    private android.widget.LinearLayout btnPlaySelected;
+    private TextView tvPlayLabel;
+    private ImageView ivPlayIcon;
+    private android.widget.LinearLayout llSelectionInfo;
+    private TextView tvSelectionCount;
     private ProgressBar progressLoading;
     private TextView tvEmptyMessage;
     private androidx.recyclerview.widget.RecyclerView recyclerView;
@@ -94,28 +101,55 @@ public class FileBrowserFragment extends Fragment {
 
     private void initViews(View view) {
         tvCurrentPath = view.findViewById(R.id.tv_current_path);
+        
+        // 返回按钮
+        btnBack = view.findViewById(R.id.btn_back);
+        btnBack.setOnClickListener(v -> onBackPressed());
+        
+        // 递归按钮
         btnRecursive = view.findViewById(R.id.btn_recursive);
+        tvRecursiveLabel = view.findViewById(R.id.tv_recursive_label);
+        
+        // 排序按钮
         btnSort = view.findViewById(R.id.btn_sort);
+        tvSortLabel = view.findViewById(R.id.tv_sort_label);
+        
+        // 播放/确认按钮
         btnPlaySelected = view.findViewById(R.id.btn_play_selected);
+        tvPlayLabel = view.findViewById(R.id.tv_play_label);
+        ivPlayIcon = view.findViewById(R.id.iv_play_icon);
+        
+        // 选中信息
+        llSelectionInfo = view.findViewById(R.id.ll_selection_info);
+        tvSelectionCount = view.findViewById(R.id.tv_selection_count);
+        
         progressLoading = view.findViewById(R.id.progress_loading);
         tvEmptyMessage = view.findViewById(R.id.tv_empty_message);
         
-        // 根据模式调整按钮文本
+        // 根据模式调整UI
         if (multiSelectMode) {
-            btnPlaySelected.setText("确认选择");
+            tvPlayLabel.setText("确认");
+            ivPlayIcon.setImageResource(android.R.drawable.ic_menu_save);
+            llSelectionInfo.setVisibility(View.VISIBLE);
             // 多选模式下显示操作提示
             android.widget.Toast.makeText(requireContext(),
                 "提示：点击进入目录，长按选中目录",
                 android.widget.Toast.LENGTH_LONG).show();
         } else {
-            btnPlaySelected.setText("播放列表");
+            tvPlayLabel.setText("播放");
+            ivPlayIcon.setImageResource(android.R.drawable.ic_media_play);
+            llSelectionInfo.setVisibility(View.GONE);
         }
         
         // 递归按钮点击事件
         btnRecursive.setOnClickListener(v -> {
-            boolean isRecursive = !viewModel.getIsLoading().getValue();
-            viewModel.setRecursive(isRecursive);
-            btnRecursive.setText(isRecursive ? "递归: 开" : "递归: 关");
+            // 获取当前加载状态，如果正在加载则不执行操作（这里的逻辑似乎有问题，原代码是 !isLoading，但isLoading是Boolean）
+            // 修正：应该获取当前递归状态并取反
+            Boolean currentRecursive = viewModel.getIsRecursive().getValue();
+            boolean newRecursive = currentRecursive == null ? true : !currentRecursive;
+            
+            viewModel.setRecursive(newRecursive);
+            tvRecursiveLabel.setText(newRecursive ? "递归:开" : "递归:关");
             // 重新加载当前目录
             String currentPath = viewModel.getCurrentPath().getValue();
             if (currentPath != null) {
@@ -147,6 +181,10 @@ public class FileBrowserFragment extends Fragment {
                     
                     if (!filesToPlay.isEmpty()) {
                         startPlayback(filesToPlay);
+                    } else {
+                        android.widget.Toast.makeText(requireContext(),
+                            "当前目录下没有可播放的文件",
+                            android.widget.Toast.LENGTH_SHORT).show();
                     }
                 }
             }
@@ -206,6 +244,13 @@ public class FileBrowserFragment extends Fragment {
             updateSortButtonText(sortMode);
         });
         
+        // 观察递归状态
+        viewModel.getIsRecursive().observe(getViewLifecycleOwner(), isRecursive -> {
+            if (tvRecursiveLabel != null) {
+                tvRecursiveLabel.setText(isRecursive ? "递归:开" : "递归:关");
+            }
+        });
+        
         // 加载初始文件列表
         viewModel.loadFileList(initialPath);
     }
@@ -231,7 +276,17 @@ public class FileBrowserFragment extends Fragment {
             default:
                 text = "名称↑";
         }
-        btnSort.setText(text);
+        tvSortLabel.setText(text);
+    }
+    
+    /**
+     * 更新选中数量显示
+     */
+    private void updateSelectionCount() {
+        if (multiSelectMode && tvSelectionCount != null && adapter != null) {
+            int count = adapter.getSelectedPaths().size();
+            tvSelectionCount.setText("已选: " + count);
+        }
     }
 
     private void setupRecyclerView(View view) {
@@ -255,6 +310,7 @@ public class FileBrowserFragment extends Fragment {
                 } else {
                     // 切换选中状态
                     adapter.toggleSelection(file.getPath());
+                    updateSelectionCount();
                 }
             } else {
                 // 普通模式：原有逻辑
@@ -299,6 +355,7 @@ public class FileBrowserFragment extends Fragment {
             if (multiSelectMode) {
                 // 多选模式：长按选中任何项目（包括目录）
                 adapter.toggleSelection(file.getPath());
+                updateSelectionCount();
                 
                 // 显示选中状态提示
                 boolean isSelected = adapter.getSelectedPaths().contains(file.getPath());
@@ -704,8 +761,9 @@ public class FileBrowserFragment extends Fragment {
     public boolean onBackPressed() {
         if (multiSelectMode) {
             // 多选模式下返回键清空选择或退出
-            if (!adapter.getSelectedPaths().isEmpty()) {
+            if (adapter != null && !adapter.getSelectedPaths().isEmpty()) {
                 adapter.clearSelection();
+                updateSelectionCount();
                 return true;
             }
         }
@@ -714,6 +772,13 @@ public class FileBrowserFragment extends Fragment {
             viewModel.goBack();
             return true;
         }
+        
+        // 如果无法返回上一级目录，则退出Activity
+        if (getActivity() != null) {
+            getActivity().finish();
+            return true;
+        }
+        
         return false;
     }
 }

@@ -148,7 +148,7 @@ public class FileAdapter extends RecyclerView.Adapter<FileAdapter.FileViewHolder
             // 设置文件图标
             if (file.isDirectory()) {
                 // 文件夹图标
-                ivFileIcon.setImageResource(android.R.drawable.ic_menu_view);
+                ivFileIcon.setImageResource(R.drawable.ic_folder_yellow);
             } else if (file.isImage()) {
                 // 加载图片缩略图
                 if (file.getThumbs() != null && file.getThumbs().getUrl1() != null) {
