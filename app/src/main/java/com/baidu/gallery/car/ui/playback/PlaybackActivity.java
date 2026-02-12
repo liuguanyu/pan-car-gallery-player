@@ -2,6 +2,7 @@
 package com.baidu.gallery.car.ui.playback;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.location.Geocoder;
@@ -20,6 +21,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.OptIn;
+import androidx.media3.common.util.UnstableApi;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.fragment.app.FragmentActivity;
@@ -59,6 +63,9 @@ import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
 import org.videolan.libvlc.interfaces.IVLCVout;
 
+import com.baidu.gallery.car.player.PlayerScheduler;
+import com.baidu.gallery.car.player.PlayerStrategy;
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
@@ -73,6 +80,7 @@ import java.util.Locale;
  * 2. ExoPlayer 失败时自动切换到 VLC - 支持更多格式（HEVC/H.265 等）
  * 3. 两者都失败则跳过当前文件
  */
+@UnstableApi
 public class PlaybackActivity extends FragmentActivity {
     private static final int LOCATION_PERMISSION_REQUEST_CODE = 1001;
     
@@ -105,6 +113,12 @@ public class PlaybackActivity extends FragmentActivity {
     // ExoPlayer 播放器 (主力播放器)
     private ExoPlayer exoPlayer;
     
+    // 播放器调度器
+    private PlayerScheduler playerScheduler;
+    
+    // 当前选择的播放器策略
+    private PlayerStrategy currentPlayerStrategy;
+    
     // 播放模式：true使用VLC，false使用ExoPlayer
     // 默认使用 ExoPlayer (主力播放器)，失败时切换到 VLC
     private boolean useVlc = false;
@@ -117,14 +131,28 @@ public class PlaybackActivity extends FragmentActivity {
     private int exoErrorCount = 0;
     private static final int MAX_EXO_RETRIES = 1;
     
+    // ExoPlayer 状态转换检测相关字段
+    private int lastExoPlayerState = Player.STATE_IDLE;
+    private long lastStateChangeTime = 0;
+    private int exoBufferingToEndedCount = 0;  // BUFFERING -> ENDED 快速转换计数
+    private static final int MAX_BUFFERING_TO_ENDED_RETRIES = 2;  // 最大重试次数
+    private static final long STATE_CHANGE_THRESHOLD = 1000; // 状态转换时间阈值(毫秒)
+    
     // 当前播放的URL
     private String currentMediaUrl = null;
     
     // 记录最后一次prepare的时间，用于性能分析
     private long lastPrepareTime = 0;
 
+    // 防止ExoPlayer.prepare()循环调用的标志位
+    private boolean isPreparingExoPlayer = false;
+    private boolean hasSwitchedToVlc = false; // 标记是否已经切换到VLC
+
     // 是否为模拟器环境
     private boolean isEmulator = false;
+    
+    // Activity是否已销毁标志位，用于防止在销毁后继续执行重试逻辑
+    private boolean isActivityDestroyed = false;
     
     // 图片播放相关
     private Handler imageHandler;
@@ -148,8 +176,9 @@ public class PlaybackActivity extends FragmentActivity {
     private DrivingModeManager drivingModeManager;
     private VoiceCommandManager voiceCommandManager;
 
+    @SuppressLint("SetTextI18n")
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
+    protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         
         // 设置全屏和沉浸式模式
@@ -180,6 +209,11 @@ public class PlaybackActivity extends FragmentActivity {
         initData();
         setupClickListeners();
         initCarFeatures();
+        initScheduler();
+    }
+
+    private void initScheduler() {
+        playerScheduler = new PlayerScheduler();
     }
     
     private void initCarFeatures() {
@@ -206,13 +240,13 @@ public class PlaybackActivity extends FragmentActivity {
     }
 
     @Override
-    protected void onNewIntent(Intent intent) {
+    protected void onNewIntent(@Nullable Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
         handleVoiceCommand(intent);
     }
 
-    private void handleVoiceCommand(Intent intent) {
+    private void handleVoiceCommand(@Nullable Intent intent) {
         if (intent != null && voiceCommandManager.isVoiceCommand(intent)) {
             // 这里可以处理更复杂的语音指令逻辑，例如快进快退等
             // 目前简单实现播放暂停切换
@@ -308,20 +342,13 @@ public class PlaybackActivity extends FragmentActivity {
     private void initVLC() {
         try {
             ArrayList<String> options = new ArrayList<>();
+            // 增加网络缓存以提高稳定性
+            options.add("--network-caching=1000");
+            // 禁用硬件加速，强制使用软解以解决HEVC花屏问题
+            options.add("--avcodec-hw=none");
             // 启用详细日志
             options.add("-vvv");
-            // 使用硬件加速：硬解优先，失败时自动降级到软解
-            if (isEmulator) {
-                // 模拟器：启用硬件加速，但允许失败时降级
-                options.add("--avcodec-hw=any");
-                options.add("--avcodec-fast");  // 快速解码模式
-                android.util.Log.d("PlaybackActivity", "VLC: 模拟器环境，硬解优先+快速模式");
-            } else {
-                // 真机：使用硬件加速，默认设置（让VLC自动选择最佳解码器）
-                options.add("--avcodec-hw=any");
-            }
-            // 增加网络缓存以提高稳定性
-            options.add("--network-caching=2000");
+            android.util.Log.d("PlaybackActivity", "[DECODER] VLC: 禁用硬件加速，强制使用软解");
             
             libVLC = new LibVLC(this, options);
             vlcMediaPlayer = new MediaPlayer(libVLC);
@@ -479,6 +506,7 @@ public class PlaybackActivity extends FragmentActivity {
                         stopProgressUpdate();
                         break;
                     case MediaPlayer.Event.EndReached:
+                        android.util.Log.d("PlaybackActivity", "[VLC] EndReached事件触发，准备播放下一个");
                         stopProgressUpdate();
                         viewModel.playNext();
                         break;
@@ -514,7 +542,7 @@ public class PlaybackActivity extends FragmentActivity {
                     .setPrioritizeTimeOverSizeThresholds(true)
                     .setBackBuffer(0, false) // 禁用后向缓冲
                     .build();
-                android.util.Log.d("PlaybackActivity", "使用模拟器优化配置：超低延迟启动");
+                android.util.Log.d("PlaybackActivity", "[PLAYBACK] 使用模拟器优化配置：超低延迟启动");
             } else {
                 // 真机：平衡的策略
                 loadControl = new androidx.media3.exoplayer.DefaultLoadControl.Builder()
@@ -528,48 +556,90 @@ public class PlaybackActivity extends FragmentActivity {
                     .build();
             }
             
-            // 配置解码器选择器：硬解优先，失败时自动降级到软解
+            // 配置解码器选择器：智能选择策略
+            // 核心改进：对于HEVC(H.265)，优先使用c2.android.hevc.decoder软件解码器
+            // c2.android.hevc.decoder支持广泛的HEVC profile，兼容性好
+            // 硬件解码器经常不支持某些profile level，VLC作为最终后备方案
             androidx.media3.exoplayer.mediacodec.MediaCodecSelector mediaCodecSelector =
-                androidx.media3.exoplayer.mediacodec.MediaCodecSelector.DEFAULT;
-
-            if (isEmulator) {
-                // 模拟器环境：自定义选择器，硬解优先但启用智能降级
-                mediaCodecSelector = (mimeType, requiresSecureDecoder, audioContentType) -> {
+                (mimeType, requiresSecureDecoder, audioContentType) -> {
                     List<androidx.media3.exoplayer.mediacodec.MediaCodecInfo> decoderInfos =
                         androidx.media3.exoplayer.mediacodec.MediaCodecSelector.DEFAULT
                             .getDecoderInfos(mimeType, requiresSecureDecoder, audioContentType);
                     
                     if (decoderInfos.isEmpty()) {
+                        android.util.Log.w("PlaybackActivity", "[DECODER] 解码器选择: 没有找到 " + mimeType + " 的解码器");
                         return decoderInfos;
                     }
                     
-                    // 策略：硬解优先，但将软解放在第二位（便于快速降级）
-                    ArrayList<androidx.media3.exoplayer.mediacodec.MediaCodecInfo> reordered = new ArrayList<>(decoderInfos);
-                    java.util.Collections.sort(reordered, (d1, d2) -> {
-                        boolean d1IsSoftware = isSoftwareDecoder(d1.name);
-                        boolean d2IsSoftware = isSoftwareDecoder(d2.name);
-                        
-                        // 硬解优先
-                        if (!d1IsSoftware && d2IsSoftware) return -1;
-                        if (d1IsSoftware && !d2IsSoftware) return 1;
-                        
-                        // 同类型按名称排序
-                        return d1.name.compareTo(d2.name);
-                    });
+                    // 打印所有可用解码器
+                    android.util.Log.d("PlaybackActivity", "[DECODER] === 解码器选择开始 (" + mimeType + ") ===");
+                    for (int i = 0; i < decoderInfos.size(); i++) {
+                        androidx.media3.exoplayer.mediacodec.MediaCodecInfo info = decoderInfos.get(i);
+                        android.util.Log.d("PlaybackActivity", "[DECODER]   可用解码器[" + i + "]: " + info.name +
+                            " (软解=" + isSoftwareDecoder(info.name) + ", 硬解=" + isHardwareDecoder(info.name) + ")");
+                    }
                     
-                    android.util.Log.d("PlaybackActivity", "模拟器解码器策略 (" + mimeType + "): " +
-                        "硬解优先 -> " + reordered.get(0).name +
-                        (reordered.size() > 1 ? ", 软解备用 -> " + reordered.get(1).name : ""));
+                    // 判断是否为HEVC/H.265格式
+                    boolean isHevc = mimeType != null &&
+                        (mimeType.contains("hevc") || mimeType.contains("hev1") || mimeType.contains("hvc1"));
+                    
+                    ArrayList<androidx.media3.exoplayer.mediacodec.MediaCodecInfo> reordered = new ArrayList<>(decoderInfos);
+                    
+                    if (isHevc) {
+                        // HEVC策略：c2.android.hevc.decoder软解优先，然后是硬件解码器
+                        // 原因：c2.android.hevc.decoder支持广泛的HEVC profile
+                        // 硬件解码器经常不支持某些profile level
+                        // VLC作为最终后备方案（在ExoPlayer失败时自动切换）
+                        java.util.Collections.sort(reordered, (d1, d2) -> {
+                            boolean d1IsC2Android = d1.name.toLowerCase(java.util.Locale.US).startsWith("c2.android.");
+                            boolean d2IsC2Android = d2.name.toLowerCase(java.util.Locale.US).startsWith("c2.android.");
+                            boolean d1IsSoftware = isSoftwareDecoder(d1.name);
+                            boolean d2IsSoftware = isSoftwareDecoder(d2.name);
+                            
+                            // c2.android.hevc.decoder优先（支持广泛的HEVC profile）
+                            if (d1IsC2Android && !d2IsC2Android) return -1;
+                            if (!d1IsC2Android && d2IsC2Android) return 1;
+                            
+                            // 其他软件解码器次之
+                            if (d1IsSoftware && !d2IsSoftware) return -1;
+                            if (!d1IsSoftware && d2IsSoftware) return 1;
+                            
+                            // 同类型按名称排序
+                            return d1.name.compareTo(d2.name);
+                        });
+                        android.util.Log.d("PlaybackActivity", "[DECODER] HEVC解码器策略: c2.android软解优先 > 硬解 > VLC后备");
+                    } else {
+                        // 非HEVC策略：硬解优先，软解备用
+                        java.util.Collections.sort(reordered, (d1, d2) -> {
+                            boolean d1IsSoftware = isSoftwareDecoder(d1.name);
+                            boolean d2IsSoftware = isSoftwareDecoder(d2.name);
+                            
+                            // 硬解优先
+                            if (!d1IsSoftware && d2IsSoftware) return -1;
+                            if (d1IsSoftware && !d2IsSoftware) return 1;
+                            
+                            // 同类型按名称排序
+                            return d1.name.compareTo(d2.name);
+                        });
+                        android.util.Log.d("PlaybackActivity", "[DECODER] 非HEVC解码器策略: 硬解优先");
+                    }
+                    
+                    // 打印重排后的解码器顺序
+                    android.util.Log.d("PlaybackActivity", "[DECODER] 重排后解码器顺序:");
+                    for (int i = 0; i < reordered.size(); i++) {
+                        android.util.Log.d("PlaybackActivity", "[DECODER]   [" + i + "] " + reordered.get(i).name);
+                    }
+                    android.util.Log.d("PlaybackActivity", "[DECODER] === 解码器选择结束 ===");
                         
                     return reordered;
                 };
-                android.util.Log.d("PlaybackActivity", "ExoPlayer: 模拟器环境，硬解优先+智能降级策略");
-            }
+            android.util.Log.d("PlaybackActivity", "[DECODER] ExoPlayer: 智能解码器选择策略已启用 (HEVC: c2.android软解优先)");
 
             // 优化渲染器工厂
+            // 使用ON模式，当扩展解码器可用时使用，否则回退到内置解码器
             androidx.media3.exoplayer.DefaultRenderersFactory renderersFactory =
                 new androidx.media3.exoplayer.DefaultRenderersFactory(this)
-                    // 使用ON模式，允许扩展解码器但不优先
+                    // 使用ON模式，启用扩展解码器但不强制优先
                     .setExtensionRendererMode(
                         androidx.media3.exoplayer.DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
                     )
@@ -633,15 +703,44 @@ public class PlaybackActivity extends FragmentActivity {
             exoPlayer.addListener(new Player.Listener() {
                 @Override
                 public void onPlayerError(androidx.media3.common.PlaybackException error) {
-                    android.util.Log.e("PlaybackActivity", "ExoPlayer error: " + error.getMessage(), error);
-                    android.util.Log.e("PlaybackActivity", "Error type: " + error.errorCode);
+                    // 重置准备标志位
+                    isPreparingExoPlayer = false;
+                    
+                    android.util.Log.e("PlaybackActivity", "[ERROR] ======== ExoPlayer 错误 ========");
+                    android.util.Log.e("PlaybackActivity", "[ERROR] 错误信息: " + error.getMessage());
+                    android.util.Log.e("PlaybackActivity", "[ERROR] 错误代码: " + error.errorCode);
+                    
+                    // 获取根本原因
+                    Throwable cause = error.getCause();
+                    if (cause != null) {
+                        android.util.Log.e("PlaybackActivity", "[ERROR] 根本原因: " + cause.getClass().getName() + ": " + cause.getMessage());
+                        
+                        // 检查是否为MediaCodecRenderer.DecoderInitializationException
+                        // 这个错误表示解码器初始化失败，通常是profile level不支持
+                        String causeStr = cause.toString().toLowerCase();
+                        if (causeStr.contains("nosupport") ||
+                            causeStr.contains("profilelevel") ||
+                            causeStr.contains("codec.profilelevel") ||
+                            causeStr.contains("hev1") ||
+                            causeStr.contains("hevc")) {
+                            android.util.Log.e("PlaybackActivity", "[ERROR] ⚠️ 检测到HEVC Profile Level不支持错误！");
+                            android.util.Log.e("PlaybackActivity", "[ERROR] ⚠️ 直接切换到VLC播放器（不重试）");
+                            // 直接切换到VLC，不重试
+                            switchToVlcImmediately();
+                            return;
+                        }
+                    }
                     
                     // 特别处理解码器错误
                     if (error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
                         error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED) {
-                        android.util.Log.e("PlaybackActivity", "⚠️ 解码器错误，可能是不支持的视频格式，准备切换到VLC");
+                        android.util.Log.e("PlaybackActivity", "[ERROR] ⚠️ 解码器错误，可能是不支持的视频格式");
+                        // 对于解码器错误，直接切换VLC而不是重试
+                        switchToVlcImmediately();
+                        return;
                     }
                     
+                    android.util.Log.e("PlaybackActivity", "[ERROR] ================================");
                     handleExoPlayerError();
                 }
                 
@@ -649,22 +748,30 @@ public class PlaybackActivity extends FragmentActivity {
                 public void onVideoSizeChanged(androidx.media3.common.VideoSize videoSize) {
                     int width = videoSize.width;
                     int height = videoSize.height;
-                    android.util.Log.d("PlaybackActivity", "ExoPlayer 视频尺寸: " + width + "x" + height);
+                    android.util.Log.d("PlaybackActivity", "[PLAYBACK] ExoPlayer 视频尺寸: " + width + "x" + height);
                     
                     // 根据视频是横屏还是竖屏设置不同的缩放模式
                     if (width >= height) {
                         // 横屏视频：使用 ZOOM 模式填满屏幕 (CenterCrop)
                         playerView.setResizeMode(androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
-                        android.util.Log.d("PlaybackActivity", "横屏视频，使用 RESIZE_MODE_ZOOM (CenterCrop)");
+                        android.util.Log.d("PlaybackActivity", "[PLAYBACK] 横屏视频，使用 RESIZE_MODE_ZOOM (CenterCrop)");
                     } else {
                         // 竖屏视频：使用 FIT 模式保持比例 (FitCenter，高度占满)
                         playerView.setResizeMode(androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT);
-                        android.util.Log.d("PlaybackActivity", "竖屏视频，使用 RESIZE_MODE_FIT (FitCenter)");
+                        android.util.Log.d("PlaybackActivity", "[PLAYBACK] 竖屏视频，使用 RESIZE_MODE_FIT (FitCenter)");
                     }
                 }
 
                 @Override
                 public void onPlaybackStateChanged(int playbackState) {
+                    long currentTime = System.currentTimeMillis();
+                    long timeSinceLastState = currentTime - lastStateChangeTime;
+                    
+                    // 当ExoPlayer进入READY或ENDED状态时，重置准备标志位
+                    if (playbackState == Player.STATE_READY || playbackState == Player.STATE_ENDED) {
+                        isPreparingExoPlayer = false;
+                    }
+                    
                     String stateName;
                     switch (playbackState) {
                         case Player.STATE_IDLE:
@@ -682,13 +789,68 @@ public class PlaybackActivity extends FragmentActivity {
                         default:
                             stateName = "UNKNOWN";
                     }
-                    android.util.Log.d("PlaybackActivity", "ExoPlayer state changed: " + stateName);
+                    android.util.Log.d("PlaybackActivity", "[PLAYBACK] ExoPlayer state changed: " + stateName +
+                        " (from " + lastExoPlayerState + " after " + timeSinceLastState + "ms)");
+                    
+                    // 检测异常状态转换：BUFFERING -> ENDED (中间没有 READY)
+                    if (lastExoPlayerState == Player.STATE_BUFFERING && playbackState == Player.STATE_ENDED) {
+                        // 如果状态转换非常快，或者在BUFFERING后立即ENDED而没有经历READY状态
+                        android.util.Log.w("PlaybackActivity", "[ERROR] ⚠️ 检测到异常状态转换: BUFFERING -> ENDED (可能解码失败)");
+                        
+                        exoBufferingToEndedCount++;
+                        android.util.Log.w("PlaybackActivity", "[ERROR] 异常转换计数: " + exoBufferingToEndedCount +
+                            "/" + MAX_BUFFERING_TO_ENDED_RETRIES);
+                        
+                        if (exoBufferingToEndedCount >= MAX_BUFFERING_TO_ENDED_RETRIES) {
+                            android.util.Log.e("PlaybackActivity", "[ERROR] ❌ 连续多次解码失败，判定为格式不支持，切换到VLC");
+                            switchToVlcImmediately();
+                            return; // 阻止后续的 playNext() 调用
+                        } else {
+                            // 如果次数还不够，尝试重新prepare一次，或者让它继续playNext（如果是真的结束）
+                            // 这里我们做一个检查：如果是真正的播放结束，应该播放了比较长的时间
+                            // 如果是刚开始播放就ENDED，那肯定是异常
+                            long duration = exoPlayer.getDuration();
+                            long position = exoPlayer.getCurrentPosition();
+                            
+                            android.util.Log.d("PlaybackActivity", "[PLAYBACK] 播放位置: " + position + "/" + duration);
+                            
+                            // 如果播放位置接近0，说明还没开始播放就结束了
+                            if (position < 1000 && duration > 5000) {
+                                android.util.Log.w("PlaybackActivity", "[ERROR] ⚠️ 视频未播放即结束，可能是解码器兼容性问题");
+                                // 这种情况下，不要立即调用playNext，而是增加计数并尝试切换VLC
+                                // 如果是第一次，我们可以让它重试一次（也许是网络波动）
+                                // 但根据日志，这种情况通常是解码失败
+                                if (exoBufferingToEndedCount == 1) {
+                                    // 第一次，记录警告，但如果只有一个文件，playNext会导致无限循环
+                                    // 检查播放列表大小
+                                    int playlistSize = 0;
+                                    if (viewModel.getPlayList().getValue() != null) {
+                                        playlistSize = viewModel.getPlayList().getValue().size();
+                                    }
+                                    
+                                    if (playlistSize <= 1) {
+                                        // 只有一个文件，必须防止死循环
+                                        android.util.Log.e("PlaybackActivity", "[ERROR] 单文件播放列表，防止无限重试，直接切换VLC");
+                                        switchToVlcImmediately();
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 更新上一次状态
+                    lastExoPlayerState = playbackState;
+                    lastStateChangeTime = currentTime;
                     
                     if (playbackState == Player.STATE_READY) {
                         long readyTime = System.currentTimeMillis();
-                        android.util.Log.d("PlaybackActivity", "ExoPlayer is ready, hiding loading indicator");
-                        android.util.Log.d("PlaybackActivity", "从prepare到READY的总耗时: " +
+                        android.util.Log.d("PlaybackActivity", "[PLAYBACK] ExoPlayer is ready, hiding loading indicator");
+                        android.util.Log.d("PlaybackActivity", "[PLAYBACK] 从prepare到READY的总耗时: " +
                             (readyTime - lastPrepareTime) + "ms");
+                        
+                        // 成功进入READY状态，重置异常转换计数
+                        exoBufferingToEndedCount = 0;
                         
                         // 检查视频轨道信息
                         if (exoPlayer != null) {
@@ -699,19 +861,19 @@ public class PlaybackActivity extends FragmentActivity {
                             for (androidx.media3.common.Tracks.Group trackGroup : tracks.getGroups()) {
                                 if (trackGroup.getType() == androidx.media3.common.C.TRACK_TYPE_VIDEO && trackGroup.isSelected()) {
                                     hasVideo = true;
-                                    android.util.Log.d("PlaybackActivity", "✓ 检测到视频轨道");
+                                    android.util.Log.d("PlaybackActivity", "[PLAYBACK] ✓ 检测到视频轨道");
                                 }
                                 if (trackGroup.getType() == androidx.media3.common.C.TRACK_TYPE_AUDIO && trackGroup.isSelected()) {
                                     hasAudio = true;
-                                    android.util.Log.d("PlaybackActivity", "✓ 检测到音频轨道");
+                                    android.util.Log.d("PlaybackActivity", "[PLAYBACK] ✓ 检测到音频轨道");
                                 }
                             }
                             
-                            android.util.Log.d("PlaybackActivity", "视频轨道: " + hasVideo + ", 音频轨道: " + hasAudio);
+                            android.util.Log.d("PlaybackActivity", "[PLAYBACK] 视频轨道: " + hasVideo + ", 音频轨道: " + hasAudio);
                             
                             // 如果有音频但没有视频，可能是渲染问题
                             if (hasAudio && !hasVideo) {
-                                android.util.Log.w("PlaybackActivity", "⚠️ 警告：检测到音频但没有视频轨道");
+                                android.util.Log.w("PlaybackActivity", "[PLAYBACK] ⚠️ 警告：检测到音频但没有视频轨道");
                             }
                         }
                         
@@ -721,17 +883,18 @@ public class PlaybackActivity extends FragmentActivity {
                         // ExoPlayer 成功播放，重置错误计数
                         exoErrorCount = 0;
                     } else if (playbackState == Player.STATE_BUFFERING) {
-                        android.util.Log.d("PlaybackActivity", "ExoPlayer is buffering, showing loading indicator");
+                        android.util.Log.d("PlaybackActivity", "[PLAYBACK] ExoPlayer is buffering, showing loading indicator");
                         loadingIndicator.setVisibility(View.VISIBLE);
                     } else if (playbackState == Player.STATE_ENDED) {
-                        android.util.Log.d("PlaybackActivity", "ExoPlayer playback ended, playing next");
+                        // 只有在没有触发异常处理的情况下才播放下一个
+                        android.util.Log.d("PlaybackActivity", "[PLAYBACK] ExoPlayer playback ended, playing next");
                         viewModel.playNext();
                     }
                 }
                 
                 @Override
                 public void onRenderedFirstFrame() {
-                    android.util.Log.d("PlaybackActivity", "✓ ExoPlayer 渲染了第一帧视频");
+                    android.util.Log.d("PlaybackActivity", "[PLAYBACK] ✓ ExoPlayer 渲染了第一帧视频");
                 }
             });
         }
@@ -739,25 +902,42 @@ public class PlaybackActivity extends FragmentActivity {
 
     /**
      * 判断是否为软件解码器
+     *
+     * 修正后的判断逻辑：
+     * - c2.android.* 开头的解码器是软件解码器
+     * - FFmpeg 解码器是软件解码器
+     * - OMX.google.* 开头的解码器是硬件解码器（不是软件解码器）
      */
     private boolean isSoftwareDecoder(String name) {
         if (name == null) return false;
         String lowerName = name.toLowerCase(java.util.Locale.US);
-        // Google 的软解通常以 omx.google 或 c2.android 开头
-        if (lowerName.startsWith("omx.google.") ||
-            lowerName.startsWith("c2.android.") ||
-            lowerName.startsWith("c2.google.")) {
+        // c2.android.* 开头的是 Android 软件解码器
+        if (lowerName.startsWith("c2.android.")) {
             return true;
         }
+        // FFmpeg 解码器是纯软件解码
+        if (lowerName.contains("ffmpeg")) {
+            return true;
+        }
+        // OMX.google.* 开头的是硬件解码器（不是软件解码器）
+        // 注意：OMX.google.* 是 Google 提供的硬件解码器接口
         return false;
     }
 
     /**
      * 判断是否为硬件解码器
+     *
+     * 硬件解码器包括：
+     * - OMX.google.* 开头的解码器（Google 硬件解码器）
+     * - 包含芯片厂商标识的解码器（qcom, mtk, hisi, exynos, qti）
      */
     private boolean isHardwareDecoder(String name) {
         if (name == null) return false;
         String lowerName = name.toLowerCase(java.util.Locale.US);
+        // OMX.google.* 开头的是 Google 硬件解码器
+        if (lowerName.startsWith("omx.google.")) {
+            return true;
+        }
         // 硬件解码器通常包含芯片厂商标识
         if (lowerName.contains("qcom") ||    // 高通
             lowerName.contains("mtk") ||     // 联发科
@@ -770,42 +950,143 @@ public class PlaybackActivity extends FragmentActivity {
     }
 
     /**
+     * 检测视频文件是否为HEVC/H.265格式
+     *
+     * HEVC视频优先使用VLC播放器，因为VLC内置了FFmpeg解码器
+     * 支持更广泛的HEVC profile和level
+     *
+     * @param fileInfo 文件信息
+     * @return true表示是HEVC格式，false表示不是或无法确定
+     */
+    private boolean isHevcVideo(@Nullable FileInfo fileInfo) {
+        if (fileInfo == null) {
+            return false;
+        }
+        
+        // 方法1：通过文件扩展名判断（快速判断）
+        String fileName = fileInfo.getServerFilename();
+        if (fileName != null) {
+            String lowerFileName = fileName.toLowerCase(java.util.Locale.US);
+            // HEVC/H.265常见扩展名
+            if (lowerFileName.endsWith(".hevc") ||
+                lowerFileName.endsWith(".h265") ||
+                lowerFileName.endsWith(".265")) {
+                android.util.Log.d("PlaybackActivity", "[HEVC] 通过文件扩展名检测到HEVC视频: " + fileName);
+                return true;
+            }
+        }
+        
+        // 方法2：通过文件路径判断
+        String filePath = fileInfo.getPath();
+        if (filePath != null) {
+            String lowerPath = filePath.toLowerCase(java.util.Locale.US);
+            if (lowerPath.contains(".hevc") ||
+                lowerPath.contains(".h265") ||
+                lowerPath.contains(".265")) {
+                android.util.Log.d("PlaybackActivity", "[HEVC] 通过文件路径检测到HEVC视频: " + filePath);
+                return true;
+            }
+        }
+        
+        // 方法3：通过MediaMetadataRetriever获取实际编码格式（更准确但较慢）
+        // 注意：这个方法需要访问文件，对于网络URL可能不适用
+        // 在实际播放时，ExoPlayer会提供mimeType信息，这里只做初步判断
+        android.util.Log.d("PlaybackActivity", "[HEVC] 未检测到HEVC视频: " + fileName);
+        return false;
+    }
+
+    /**
+     * 立即切换到VLC播放器（用于解码器不兼容的情况）
+     * 这个方法跳过重试逻辑，因为解码器不兼容重试没有意义
+     */
+    private void switchToVlcImmediately() {
+        // 检查Activity是否已销毁，如果已销毁则不执行重试逻辑
+        if (isActivityDestroyed) {
+            android.util.Log.d("PlaybackActivity", "[SWITCH] switchToVlcImmediately: Activity已销毁，跳过切换");
+            return;
+        }
+        
+        // 防止重复切换
+        if (hasSwitchedToVlc) {
+            android.util.Log.w("PlaybackActivity", "[SWITCH] 已经切换到VLC，跳过重复切换");
+            return;
+        }
+        
+        android.util.Log.d("PlaybackActivity", "[SWITCH] === 立即切换到VLC播放器 ===");
+        loadingIndicator.setVisibility(View.GONE);
+        
+        // 设置标志位，阻止后续的ExoPlayer准备
+        hasSwitchedToVlc = true;
+        isPreparingExoPlayer = false;
+        
+        // 停止 ExoPlayer
+        if (exoPlayer != null) {
+            exoPlayer.stop();
+        }
+        
+        // 切换到 VLC
+        useVlc = true;
+        exoErrorCount = 0;
+        updatePlayerIndicator();
+        
+        Toast.makeText(this, "ExoPlayer不支持此视频格式，切换到VLC", Toast.LENGTH_SHORT).show();
+        
+        // 重新尝试播放
+        if (currentMediaUrl != null) {
+            android.util.Log.d("PlaybackActivity", "[SWITCH] 使用VLC重新播放: " + currentMediaUrl);
+            playVideoWithUrl(currentMediaUrl);
+        } else {
+            android.util.Log.w("PlaybackActivity", "[SWITCH] 没有可用的媒体URL，跳到下一个");
+            viewModel.playNext();
+        }
+    }
+
+    /**
      * 处理 ExoPlayer 播放错误，尝试切换到 VLC
+     * 注意：解码器错误（如HEVC profile不支持）应该使用 switchToVlcImmediately()
      */
     private void handleExoPlayerError() {
+        // 检查Activity是否已销毁，如果已销毁则不执行重试逻辑
+        if (isActivityDestroyed) {
+            android.util.Log.d("PlaybackActivity", "[ERROR] handleExoPlayerError: Activity已销毁，跳过错误处理");
+            return;
+        }
+        
+        // 防止重复切换
+        if (hasSwitchedToVlc) {
+            android.util.Log.w("PlaybackActivity", "[ERROR] 已经切换到VLC，跳过重复错误处理");
+            return;
+        }
+        
         exoErrorCount++;
         loadingIndicator.setVisibility(View.GONE);
         
-        // 对于解码器错误，直接切换到 VLC，不重试
-        // 解码器错误通常意味着设备不支持该视频格式，重试没有意义
-        if (exoErrorCount > 1) {
-            // ExoPlayer 彻底失败，切换到 VLC
-            android.util.Log.d("PlaybackActivity", "ExoPlayer失败次数过多，切换到VLC");
-            Toast.makeText(this, "ExoPlayer播放失败，切换到VLC播放器", Toast.LENGTH_SHORT).show();
-            
-            // 释放 ExoPlayer
-            if (exoPlayer != null) {
-                exoPlayer.stop();
-            }
-            
-            // 切换到 VLC
-            useVlc = true;
-            exoErrorCount = 0;
-            updatePlayerIndicator();
-            
-            // 重新尝试播放
-            if (currentMediaUrl != null) {
-                playVideoWithUrl(currentMediaUrl);
-            } else {
-                viewModel.playNext();
-            }
+        android.util.Log.d("PlaybackActivity", "[ERROR] ExoPlayer错误处理, 错误次数: " + exoErrorCount);
+        
+        // 不再重试，直接切换到VLC
+        // 原因：大多数ExoPlayer错误重试没有意义，浪费用户时间
+        android.util.Log.d("PlaybackActivity", "[SWITCH] ExoPlayer失败，直接切换到VLC");
+        Toast.makeText(this, "ExoPlayer播放失败，切换到VLC播放器", Toast.LENGTH_SHORT).show();
+        
+        // 设置标志位，阻止后续的ExoPlayer准备
+        hasSwitchedToVlc = true;
+        isPreparingExoPlayer = false;
+        
+        // 释放 ExoPlayer
+        if (exoPlayer != null) {
+            exoPlayer.stop();
+        }
+        
+        // 切换到 VLC
+        useVlc = true;
+        exoErrorCount = 0;
+        updatePlayerIndicator();
+        
+        // 重新尝试播放
+        if (currentMediaUrl != null) {
+            playVideoWithUrl(currentMediaUrl);
         } else {
-            // 只重试一次
-            android.util.Log.d("PlaybackActivity", "ExoPlayer错误，尝试重试 (1/1)");
-            if (exoPlayer != null) {
-                exoPlayer.prepare();
-                exoPlayer.play();
-            }
+            viewModel.playNext();
         }
     }
 
@@ -1153,25 +1434,53 @@ public class PlaybackActivity extends FragmentActivity {
 
     /**
      * 播放当前文件
+     *
+     * 解码器优先级策略：
+     * 1. 对于HEVC视频：VLC播放器（内置FFmpeg，最高优先级）
+     * 2. 对于其他视频：ExoPlayer（使用c2.android.hevc.decoder软解作为备选）
+     * 3. 失败时自动切换到VLC作为后备方案
      */
     private void playCurrentFile() {
-        // 每次播放新文件时，重置为使用ExoPlayer（优先）
-        // 除非是因为ExoPlayer播放失败导致的重试（这种情况下由handleExoPlayerError处理，不会重新调playCurrentFile）
-        useVlc = false;
-        exoErrorCount = 0;
-        vlcErrorCount = 0;
-        
         FileInfo currentFile = viewModel.getCurrentFile();
         if (currentFile == null) {
             android.util.Log.e("PlaybackActivity", "playCurrentFile: currentFile is null");
             return;
+        }
+        
+        // 重置错误计数
+        exoErrorCount = 0;
+        vlcErrorCount = 0;
+        
+        // 重置状态转换检测
+        lastExoPlayerState = Player.STATE_IDLE;
+        exoBufferingToEndedCount = 0;
+        
+        // 重置ExoPlayer准备标志位（新文件重新开始）
+        isPreparingExoPlayer = false;
+        hasSwitchedToVlc = false;
+        
+        // 检测视频格式，决定播放器策略
+        if (currentFile.isVideo()) {
+            // 使用调度器选择策略
+            currentPlayerStrategy = playerScheduler.selectStrategy(currentFile, null, null);
+            
+            if (currentPlayerStrategy.getName().equals("VLC")) {
+                android.util.Log.d("PlaybackActivity", "[HEVC] ★★★ 调度器选择使用VLC播放器 ★★★");
+                useVlc = true;
+                hasSwitchedToVlc = true; // 标记已使用VLC，防止后续误切换
+            } else {
+                android.util.Log.d("PlaybackActivity", "[DECODER] 调度器选择使用ExoPlayer");
+                useVlc = false;
+            }
         }
 
         android.util.Log.d("PlaybackActivity", "playCurrentFile: " + currentFile.getServerFilename() +
             ", path=" + currentFile.getPath() +
             ", fsId=" + currentFile.getFsId() +
             ", category=" + currentFile.getCategory() +
-            ", hasDlink=" + (currentFile.getDlink() != null));
+            ", hasDlink=" + (currentFile.getDlink() != null) +
+            ", useVlc=" + useVlc +
+            ", strategy=" + (currentPlayerStrategy != null ? currentPlayerStrategy.getName() : "null"));
 
         // 更新文件名
         tvFileName.setText(currentFile.getServerFilename());
@@ -1198,8 +1507,12 @@ public class PlaybackActivity extends FragmentActivity {
 
     /**
      * 使用URL播放视频
+     * 会记录当前播放的URL，用于播放器切换时重试
      */
     private void playVideoWithUrl(String videoUrl) {
+        // 保存当前播放的URL，用于在播放器之间切换时重新播放
+        currentMediaUrl = videoUrl;
+        
         // 双重保险：强制使用最新的Access Token更新URL
         // 这能解决因Token过期或ViewModel缓存导致的403权限错误
         if (authRepository != null) {
@@ -1228,6 +1541,15 @@ public class PlaybackActivity extends FragmentActivity {
         ivBackground.setVisibility(View.VISIBLE);
         
         updatePlayerIndicator();
+        
+        // 如果是HEVC视频，确保使用VLC
+        FileInfo currentFile = viewModel.getCurrentFile();
+        if (currentFile != null && isHevcVideo(currentFile) && !useVlc) {
+             android.util.Log.w("PlaybackActivity", "[HEVC] 发现HEVC视频但未启用VLC，强制切换到VLC模式");
+             useVlc = true;
+             hasSwitchedToVlc = true;
+             updatePlayerIndicator();
+        }
         
         if (useVlc) {
             // 使用 VLC 播放
@@ -1265,6 +1587,11 @@ public class PlaybackActivity extends FragmentActivity {
                 
                 // 延迟播放，确保Surface准备完成
                 new Handler().postDelayed(() -> {
+                    // 检查Activity是否已销毁
+                    if (isActivityDestroyed) {
+                        android.util.Log.d("PlaybackActivity", "VLC延迟播放: Activity已销毁，跳过播放");
+                        return;
+                    }
                     if (vlcMediaPlayer != null) {
                         vlcMediaPlayer.play();
                         viewModel.setPlaying(true);
@@ -1281,6 +1608,18 @@ public class PlaybackActivity extends FragmentActivity {
             playerView.setVisibility(View.VISIBLE);
             
             if (videoUrl != null && !videoUrl.isEmpty()) {
+                // 检查是否已经切换到VLC，如果是则跳过ExoPlayer准备
+                if (hasSwitchedToVlc) {
+                    android.util.Log.w("PlaybackActivity", "已经切换到VLC，跳过ExoPlayer准备");
+                    return;
+                }
+                
+                // 检查是否正在准备中，防止重复调用
+                if (isPreparingExoPlayer) {
+                    android.util.Log.w("PlaybackActivity", "ExoPlayer正在准备中，跳过重复调用");
+                    return;
+                }
+                
                 long startTime = System.currentTimeMillis();
                 android.util.Log.d("PlaybackActivity", "开始ExoPlayer准备");
                 android.util.Log.d("PlaybackActivity", "完整视频URL: " + videoUrl);
@@ -1291,6 +1630,9 @@ public class PlaybackActivity extends FragmentActivity {
                 } else {
                     android.util.Log.e("PlaybackActivity", "✗ 警告：URL中缺少access_token参数！");
                 }
+                
+                // 设置准备标志位
+                isPreparingExoPlayer = true;
                 
                 // 清除之前的媒体项，防止上一个视频的帧残留
                 exoPlayer.clearMediaItems();
@@ -1306,6 +1648,11 @@ public class PlaybackActivity extends FragmentActivity {
                 // 记录prepare开始时间
                 lastPrepareTime = System.currentTimeMillis();
                 long prepareStartTime = lastPrepareTime;
+                
+                // 重置状态检测变量
+                lastExoPlayerState = Player.STATE_IDLE;
+                lastStateChangeTime = System.currentTimeMillis();
+                
                 exoPlayer.prepare();
                 android.util.Log.d("PlaybackActivity", "ExoPlayer.prepare() 调用完成，耗时: " +
                     (System.currentTimeMillis() - prepareStartTime) + "ms");
@@ -1366,12 +1713,12 @@ public class PlaybackActivity extends FragmentActivity {
                     .transition(transitionOptions)
                     .listener(new RequestListener<android.graphics.drawable.Drawable>() {
                         @Override
-                        public boolean onLoadFailed(@androidx.annotation.Nullable com.bumptech.glide.load.engine.GlideException e, Object model, Target<android.graphics.drawable.Drawable> target, boolean isFirstResource) {
+                        public boolean onLoadFailed(@Nullable com.bumptech.glide.load.engine.GlideException e, @Nullable Object model, @NonNull Target<android.graphics.drawable.Drawable> target, boolean isFirstResource) {
                             return false;
                         }
 
                         @Override
-                        public boolean onResourceReady(android.graphics.drawable.Drawable resource, Object model, Target<android.graphics.drawable.Drawable> target, com.bumptech.glide.load.DataSource dataSource, boolean isFirstResource) {
+                        public boolean onResourceReady(@NonNull android.graphics.drawable.Drawable resource, @NonNull Object model, @NonNull Target<android.graphics.drawable.Drawable> target, @NonNull com.bumptech.glide.load.DataSource dataSource, boolean isFirstResource) {
                             // 图片加载完成后应用动画
                             // 对于非FADE效果，需要先设置初始状态再开始动画
                             new Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
@@ -1418,7 +1765,7 @@ public class PlaybackActivity extends FragmentActivity {
      * 在图片加载完成后调用
      * 使用策略模式实现，方便扩展新的背景效果
      */
-    private void updateImageBackground(android.graphics.drawable.Drawable imageDrawable) {
+    private void updateImageBackground(@Nullable android.graphics.drawable.Drawable imageDrawable) {
         if (imageDrawable == null || ivBackground == null) {
             return;
         }
@@ -1444,13 +1791,24 @@ public class PlaybackActivity extends FragmentActivity {
      * 启动图片显示定时器
      */
     private void startImageDisplayTimer() {
+        // 检查Activity是否已销毁
+        if (isActivityDestroyed) {
+            android.util.Log.d("PlaybackActivity", "startImageDisplayTimer: Activity已销毁，跳过定时器启动");
+            return;
+        }
+        
         // 移除之前的回调
-        if (imageRunnable != null) {
+        if (imageRunnable != null && imageHandler != null) {
             imageHandler.removeCallbacks(imageRunnable);
         }
         
         // 创建新的回调
         imageRunnable = () -> {
+            // 检查Activity是否已销毁，如果已销毁则不执行
+            if (isActivityDestroyed) {
+                android.util.Log.d("PlaybackActivity", "startImageDisplayTimer: Activity已销毁，跳过播放下一张");
+                return;
+            }
             // 播放下一张图片
             viewModel.playNext();
         };
@@ -1462,7 +1820,9 @@ public class PlaybackActivity extends FragmentActivity {
         }
         
         // 延迟执行
-        imageHandler.postDelayed(imageRunnable, duration);
+        if (imageHandler != null) {
+            imageHandler.postDelayed(imageRunnable, duration);
+        }
     }
     
     private void stopCurrentPlayback() {
@@ -1476,6 +1836,9 @@ public class PlaybackActivity extends FragmentActivity {
             exoPlayer.stop();
             exoPlayer.clearMediaItems(); // 确保完全清除
         }
+        
+        // 重置准备标志位
+        isPreparingExoPlayer = false;
         
         // 确保PlayerView不显示旧内容
         if (playerView != null) {
@@ -1582,19 +1945,34 @@ public class PlaybackActivity extends FragmentActivity {
     }
     
     private void startProgressUpdate() {
-        if (progressRunnable != null) {
+        // 检查Activity是否已销毁
+        if (isActivityDestroyed) {
+            android.util.Log.d("PlaybackActivity", "startProgressUpdate: Activity已销毁，跳过进度更新启动");
+            return;
+        }
+        
+        if (progressRunnable != null && progressHandler != null) {
             progressHandler.removeCallbacks(progressRunnable);
         }
         
         progressRunnable = new Runnable() {
             @Override
             public void run() {
+                // 检查Activity是否已销毁，如果已销毁则停止更新
+                if (isActivityDestroyed) {
+                    android.util.Log.d("PlaybackActivity", "startProgressUpdate: Activity已销毁，停止进度更新");
+                    return;
+                }
                 updateProgress();
-                progressHandler.postDelayed(this, 1000);
+                if (progressHandler != null) {
+                    progressHandler.postDelayed(this, 1000);
+                }
             }
         };
         
-        progressHandler.post(progressRunnable);
+        if (progressHandler != null) {
+            progressHandler.post(progressRunnable);
+        }
     }
     
     private void stopProgressUpdate() {
@@ -1640,8 +2018,19 @@ public class PlaybackActivity extends FragmentActivity {
         
         if (!isCurrentFileVideo()) return;
         
-        String playerName = useVlc ? "VLC Player" : "ExoPlayer";
-        android.util.Log.d("PlaybackActivity", "当前使用的播放器: " + playerName);
+        String playerName = currentPlayerStrategy != null ?
+            currentPlayerStrategy.getName() :
+            (useVlc ? "VLC Player" : "ExoPlayer");
+        
+        // 检查是否为HEVC视频，添加额外日志
+        FileInfo currentFile = viewModel.getCurrentFile();
+        boolean isHevc = currentFile != null && isHevcVideo(currentFile);
+        
+        if (isHevc) {
+            android.util.Log.d("PlaybackActivity", "[SWITCH] 当前使用的播放器: " + playerName + " (HEVC视频 - VLC优先策略)");
+        } else {
+            android.util.Log.d("PlaybackActivity", "[SWITCH] 当前使用的播放器: " + playerName);
+        }
     }
 
     private boolean isCurrentFileVideo() {
@@ -1649,7 +2038,7 @@ public class PlaybackActivity extends FragmentActivity {
         return currentFile != null && currentFile.isVideo();
     }
     
-    private void getLocationForFile(FileInfo file, String mediaUrl) {
+    private void getLocationForFile(@Nullable FileInfo file, @Nullable String mediaUrl) {
         if (file == null || mediaUrl == null) {
             android.util.Log.d("PlaybackActivity", "getLocationForFile: file or mediaUrl is null");
             return;
@@ -1710,8 +2099,14 @@ public class PlaybackActivity extends FragmentActivity {
      * 针对H.265/HEVC（特别是苹果设备拍摄）和高帧率视频的兼容性问题
      */
     private void handleVlcError() {
+        // 检查Activity是否已销毁，如果已销毁则不执行重试逻辑
+        if (isActivityDestroyed) {
+            android.util.Log.d("PlaybackActivity", "[ERROR] handleVlcError: Activity已销毁，跳过错误处理");
+            return;
+        }
+        
         vlcErrorCount++;
-        android.util.Log.w("PlaybackActivity", "VLC播放错误 (错误次数: " + vlcErrorCount + "/" + MAX_VLC_RETRIES + ")");
+        android.util.Log.w("PlaybackActivity", "[ERROR] VLC播放错误 (错误次数: " + vlcErrorCount + "/" + MAX_VLC_RETRIES + ")");
         
         FileInfo currentFile = viewModel.getCurrentFile();
         if (currentFile == null) {
@@ -1741,6 +2136,7 @@ public class PlaybackActivity extends FragmentActivity {
                     Toast.LENGTH_SHORT).show();
                 vlcErrorCount = 0; // 重置计数器
                 useVlc = false;
+                android.util.Log.d("PlaybackActivity", "[SWITCH] VLC播放失败，切换到ExoPlayer");
                 updatePlayerIndicator();
                 
                 // 重新播放当前文件
@@ -1799,7 +2195,7 @@ public class PlaybackActivity extends FragmentActivity {
                     playVideoWithUrl(currentMediaUrl);
                 }
             } catch (Exception e) {
-                android.util.Log.e("PlaybackActivity", "重新初始化VLC失败", e);
+                android.util.Log.e("PlaybackActivity", "[ERROR] 重新初始化VLC失败", e);
                 Toast.makeText(this, "播放器初始化失败，跳过此文件", Toast.LENGTH_SHORT).show();
                 vlcErrorCount = 0;
                 viewModel.playNext();
@@ -1808,7 +2204,7 @@ public class PlaybackActivity extends FragmentActivity {
     }
     
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
+    public boolean onKeyDown(int keyCode, @NonNull KeyEvent event) {
         // 全局快捷键
         switch (keyCode) {
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
@@ -1878,42 +2274,98 @@ public class PlaybackActivity extends FragmentActivity {
     @Override
     protected void onPause() {
         super.onPause();
+        android.util.Log.d("PlaybackActivity", "onPause called");
+        
+        // 停止播放
         if (useVlc && vlcMediaPlayer != null && vlcMediaPlayer.isPlaying()) {
             vlcMediaPlayer.pause();
+            android.util.Log.d("PlaybackActivity", "onPause: VLC paused");
         } else if (exoPlayer != null && exoPlayer.isPlaying()) {
             exoPlayer.pause();
+            android.util.Log.d("PlaybackActivity", "onPause: ExoPlayer paused");
+        }
+        
+        // 停止图片定时器
+        if (imageRunnable != null && imageHandler != null) {
+            imageHandler.removeCallbacks(imageRunnable);
+            android.util.Log.d("PlaybackActivity", "onPause: Image timer stopped");
+        }
+        
+        // 停止进度更新
+        stopProgressUpdate();
+        
+        // 停止控制栏隐藏定时器
+        if (controlsRunnable != null && controlsHandler != null) {
+            controlsHandler.removeCallbacks(controlsRunnable);
+        }
+        
+        // 停止地点信息隐藏定时器
+        if (locationRunnable != null && locationHandler != null) {
+            locationHandler.removeCallbacks(locationRunnable);
         }
     }
     
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        android.util.Log.d("PlaybackActivity", "onDestroy called - 开始清理资源");
         
-        // 释放VLC资源
+        // 设置销毁标志位，防止后续重试逻辑继续执行
+        isActivityDestroyed = true;
+        android.util.Log.d("PlaybackActivity", "onDestroy: isActivityDestroyed标志已设置");
+        
+        // 停止并释放VLC资源
         if (vlcMediaPlayer != null) {
             vlcMediaPlayer.stop();
             vlcMediaPlayer.getVLCVout().detachViews();
             vlcMediaPlayer.release();
+            vlcMediaPlayer = null;
+            android.util.Log.d("PlaybackActivity", "onDestroy: VLC播放器已释放");
         }
         if (libVLC != null) {
             libVLC.release();
+            libVLC = null;
+            android.util.Log.d("PlaybackActivity", "onDestroy: LibVLC已释放");
         }
         
-        // 释放ExoPlayer资源
+        // 停止并释放ExoPlayer资源
         if (exoPlayer != null) {
+            exoPlayer.stop();
+            exoPlayer.clearMediaItems();
             exoPlayer.release();
+            exoPlayer = null;
+            android.util.Log.d("PlaybackActivity", "onDestroy: ExoPlayer已释放");
         }
         
-        // 清理Handler
+        // 清理所有Handler的回调
         if (imageHandler != null) {
             imageHandler.removeCallbacksAndMessages(null);
+            imageHandler = null;
+            android.util.Log.d("PlaybackActivity", "onDestroy: ImageHandler已清理");
         }
         if (controlsHandler != null) {
             controlsHandler.removeCallbacksAndMessages(null);
+            controlsHandler = null;
+            android.util.Log.d("PlaybackActivity", "onDestroy: ControlsHandler已清理");
         }
         if (progressHandler != null) {
             progressHandler.removeCallbacksAndMessages(null);
+            progressHandler = null;
+            android.util.Log.d("PlaybackActivity", "onDestroy: ProgressHandler已清理");
         }
+        if (locationHandler != null) {
+            locationHandler.removeCallbacksAndMessages(null);
+            locationHandler = null;
+            android.util.Log.d("PlaybackActivity", "onDestroy: LocationHandler已清理");
+        }
+        
+        // 清理Runnable引用
+        imageRunnable = null;
+        controlsRunnable = null;
+        progressRunnable = null;
+        locationRunnable = null;
+        
+        android.util.Log.d("PlaybackActivity", "onDestroy: 所有资源清理完成");
     }
 
     /**
