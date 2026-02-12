@@ -198,12 +198,10 @@ public class FileBrowserViewModel extends AndroidViewModel {
         String accessToken = authService.getAccessToken();
         android.util.Log.d("FileBrowserViewModel", "accessToken: " + (accessToken != null ? accessToken.substring(0, Math.min(20, accessToken.length())) + "..." : "null"));
 
-        LiveData<List<FileInfo>> result;
-        if (isRecursive) {
-            result = repository.getFileListRecursive(accessToken, path, mediaType);
-        } else {
-            result = repository.getFileList(accessToken, path, mediaType);
-        }
+        // 注意：在文件浏览界面，无论递归开关状态如何，都应该使用非递归API
+        // 因为递归API（listall）只返回文件，不返回目录，会导致无法浏览子目录
+        // 递归开关只影响"播放当前目录"或"确认选择"时的行为
+        LiveData<List<FileInfo>> result = repository.getFileList(accessToken, path, mediaType);
 
         // 观察结果
         result.observeForever(files -> {
